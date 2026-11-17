@@ -221,3 +221,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GymGenie local database
+gymgenie.db
+gymgenie.db-journal
+gymgenie.db-wal
+gymgenie.db-shm
