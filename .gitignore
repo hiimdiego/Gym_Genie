@@ -232,3 +232,10 @@ gymgenie.db-shm
 data/free*.json
 data/exercises.csv
 data/images/
+
+
+# GymGenie local workout database
+data/gymgenie.db
+data/gymgenie.db-journal
+data/gymgenie.db-wal
+data/gymgenie.db-shm

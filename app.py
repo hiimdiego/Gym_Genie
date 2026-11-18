@@ -1,4 +1,5 @@
 
+import pandas as pd
 import streamlit as st
 
 from src.data_loader import load_exercises
@@ -14,10 +15,17 @@ from src.workout import (
     estimate_exercise_seconds,
     WARMUP_MINUTES,
 )
+from src.database import (
+    initialize_database,
+    save_workout,
+    get_saved_workouts,
+    load_saved_workout,
+    delete_saved_workout,
+)
 
 
 # ---------------------------------
-# PAGE CONFIGURATION AND DATA
+# PAGE CONFIGURATION
 # ---------------------------------
 
 st.set_page_config(
@@ -27,6 +35,10 @@ st.set_page_config(
 )
 
 
+# ---------------------------------
+# LOAD DATA
+# ---------------------------------
+
 @st.cache_data
 def get_exercises():
     return load_exercises()
@@ -34,10 +46,16 @@ def get_exercises():
 
 try:
     exercises = get_exercises()
+    initialize_database()
+
 except (FileNotFoundError, KeyError, ValueError) as error:
-    st.error(f"Unable to load dataset: {error}")
+    st.error(f"Unable to initialize GymGenie: {error}")
     st.stop()
 
+
+# ---------------------------------
+# INPUT OPTIONS
+# ---------------------------------
 
 EQUIPMENT_OPTIONS = [
     "Dumbbells",
@@ -70,14 +88,17 @@ MUSCLE_OPTIONS = [
 # SESSION STATE
 # ---------------------------------
 
-if "workout" not in st.session_state:
-    st.session_state.workout = None
+defaults = {
+    "workout": None,
+    "workout_preferences": None,
+    "ranked_results": None,
+    "replacement_equipment": [],
+    "workout_name": "",
+}
 
-if "workout_preferences" not in st.session_state:
-    st.session_state.workout_preferences = None
-
-if "ranked_results" not in st.session_state:
-    st.session_state.ranked_results = None
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # ---------------------------------
@@ -85,11 +106,12 @@ if "ranked_results" not in st.session_state:
 # ---------------------------------
 
 def calculate_workout_time(workout, preferences):
-    """Recalculate estimated time including warm-up."""
+    """Calculate estimated workout time."""
 
     total_seconds = WARMUP_MINUTES * 60
 
     for _, exercise in workout.iterrows():
+
         prescription = get_prescription(
             exercise,
             preferences["experience"],
@@ -103,11 +125,80 @@ def calculate_workout_time(workout, preferences):
     return round(total_seconds / 60, 1)
 
 
-def display_exercise(exercise, index, workout_mode=False):
-    """Display exercise details and instructions."""
+def restore_workout(saved):
+    """
+    Reconstruct a saved workout using exercise IDs.
+
+    Exercise information is retrieved from the
+    locally loaded RepDB dataset.
+    """
+
+    preferences = saved["preferences"]
+
+    exercise_lookup = exercises.set_index("id")
+
+    records = []
+
+    for saved_exercise in saved["exercises"]:
+
+        exercise_id = saved_exercise["id"]
+
+        if exercise_id not in exercise_lookup.index:
+            st.warning(
+                f"Exercise {exercise_id} was not found "
+                "in the current dataset."
+            )
+            continue
+
+        record = exercise_lookup.loc[
+            exercise_id
+        ].to_dict()
+
+        record["id"] = exercise_id
+
+        for field in [
+            "sets",
+            "reps",
+            "rest_seconds",
+            "prescription_type",
+            "estimated_minutes",
+        ]:
+            record[field] = saved_exercise[field]
+
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame(), pd.DataFrame()
+
+    workout = pd.DataFrame(records)
+
+    # Recalculate retrieval scores for display.
+    ranked = rank_exercises(
+        all_exercises=exercises,
+        filtered_exercises=workout,
+        selected_muscles=preferences["muscles"],
+        method=preferences["ranking"],
+    )
+
+    score_lookup = ranked.set_index("id")
+
+    for column in [
+        "muscle_score",
+        "tfidf_score",
+        "relevance_score",
+    ]:
+        workout[column] = workout["id"].map(
+            score_lookup[column]
+        ).fillna(0.0)
+
+    return workout, ranked
+
+
+def display_exercise(exercise, number, workout_mode=False):
+    """Display exercise details."""
 
     with st.expander(
-        f"{index}. {exercise['name']}",
+        f"{number}. {exercise['name']}",
         expanded=True,
     ):
 
@@ -116,7 +207,10 @@ def display_exercise(exercise, index, workout_mode=False):
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                st.metric("Sets", int(exercise["sets"]))
+                st.metric(
+                    "Sets",
+                    int(exercise["sets"]),
+                )
 
             with col2:
                 label = (
@@ -124,7 +218,11 @@ def display_exercise(exercise, index, workout_mode=False):
                     if exercise["prescription_type"] == "hold"
                     else "Reps"
                 )
-                st.metric(label, exercise["reps"])
+
+                st.metric(
+                    label,
+                    exercise["reps"],
+                )
 
             with col3:
                 st.metric(
@@ -133,7 +231,7 @@ def display_exercise(exercise, index, workout_mode=False):
                 )
 
             st.caption(
-                f"Estimated exercise time: "
+                "Estimated exercise time: "
                 f"{exercise['estimated_minutes']:.1f} min"
             )
 
@@ -164,17 +262,25 @@ def display_exercise(exercise, index, workout_mode=False):
                 "**Equipment:**",
                 exercise["equipment_name"],
             )
+
             additional = exercise.get(
                 "additional_required_equipment"
             )
+
             if isinstance(additional, list) and additional:
                 st.write(
                     "**Additional Equipment IDs:**",
                     ", ".join(additional),
                 )
+
             st.write(
                 "**Difficulty:**",
                 exercise["difficulty"].title(),
+            )
+
+            st.write(
+                "**Category:**",
+                exercise["category"].title(),
             )
 
         with col2:
@@ -202,6 +308,7 @@ def display_exercise(exercise, index, workout_mode=False):
 
         if isinstance(instructions, list) and instructions:
             st.write("**Instructions:**")
+
             for number, instruction in enumerate(
                 instructions,
                 start=1,
@@ -224,15 +331,87 @@ st.title("💪 GymGenie")
 st.subheader("Your Personalized Workout Planner")
 
 st.write(
-    "Create personalized, equipment-aware workouts "
-    "using exercise retrieval and ranking."
+    "Generate, customize, save, and reuse "
+    "equipment-aware workouts."
 )
 
 st.divider()
 
 
 # ---------------------------------
-# WORKOUT FORM
+# SAVED WORKOUTS SIDEBAR
+# ---------------------------------
+
+with st.sidebar:
+
+    st.header("Saved Workouts")
+
+    saved_workouts = get_saved_workouts()
+
+    if not saved_workouts:
+        st.info("You haven't saved any workouts yet.")
+
+    else:
+        saved_by_id = {
+            item["id"]: item
+            for item in saved_workouts
+        }
+
+        selected_saved_id = st.selectbox(
+            "Choose a saved workout:",
+            options=list(saved_by_id.keys()),
+            format_func=lambda workout_id: (
+                saved_by_id[workout_id]["name"]
+                + " — "
+                + saved_by_id[workout_id]["created_at"]
+            ),
+        )
+
+        if st.button(
+            "Load Workout",
+            use_container_width=True,
+        ):
+
+            saved = load_saved_workout(
+                selected_saved_id
+            )
+
+            if saved is not None:
+
+                restored, ranked = restore_workout(saved)
+
+                st.session_state.workout = restored
+                st.session_state.ranked_results = ranked
+                st.session_state.workout_preferences = (
+                    saved["preferences"]
+                )
+                st.session_state.replacement_equipment = (
+                    saved["preferences"]["equipment"].copy()
+                )
+                st.session_state.workout_name = (
+                    saved["name"]
+                )
+
+                st.rerun()
+
+        confirm_delete = st.checkbox(
+            "Confirm deletion of selected workout"
+        )
+
+        if st.button(
+            "Delete Workout",
+            disabled=not confirm_delete,
+            use_container_width=True,
+        ):
+
+            delete_saved_workout(selected_saved_id)
+
+            st.success("Workout deleted!")
+            st.rerun()
+
+
+# ---------------------------------
+# WORKOUT PREFERENCES
 # ---------------------------------
 
 st.header("Customize Your Workout")
@@ -242,7 +421,7 @@ with st.form("workout_form"):
     st.subheader("1. Available Equipment")
 
     selected_equipment = st.multiselect(
-        "Select your available equipment:",
+        "Select available equipment:",
         EQUIPMENT_OPTIONS,
     )
 
@@ -253,7 +432,7 @@ with st.form("workout_form"):
     st.subheader("2. Target Muscle Groups")
 
     selected_muscles = st.multiselect(
-        "Choose your target muscles:",
+        "Choose target muscles:",
         MUSCLE_OPTIONS,
     )
 
@@ -298,7 +477,7 @@ with st.form("workout_form"):
     st.subheader("7. Number of Exercises")
 
     num_exercises = st.slider(
-        "Desired number of exercises:",
+        "Number of exercises:",
         min_value=1,
         max_value=12,
         value=5,
@@ -312,15 +491,18 @@ with st.form("workout_form"):
 
 
 # ---------------------------------
-# GENERATE RESULTS
+# GENERATE WORKOUT
 # ---------------------------------
 
 if submitted:
 
     if not selected_muscles:
-        st.warning("Please select at least one muscle group.")
+        st.warning(
+            "Please select at least one muscle group."
+        )
 
     else:
+
         filtered = filter_exercises(
             exercises,
             selected_equipment,
@@ -357,6 +539,7 @@ if submitted:
         st.session_state.replacement_equipment = (
             selected_equipment.copy()
         )
+        st.session_state.workout_name = ""
 
         if exercise_category == "Strength":
 
@@ -373,7 +556,7 @@ if submitted:
 
 
 # ---------------------------------
-# DISPLAY PERSISTENT RESULTS
+# DISPLAY RESULTS
 # ---------------------------------
 
 preferences = st.session_state.workout_preferences
@@ -395,12 +578,12 @@ if preferences is not None:
     )
 
     st.write(
-        "**Experience Level:**",
+        "**Experience:**",
         preferences["experience"],
     )
 
     st.write(
-        "**Ranking Method:**",
+        "**Ranking:**",
         preferences["ranking"],
     )
 
@@ -414,7 +597,7 @@ if preferences is not None:
         st.warning("No compatible exercises found.")
 
     # ---------------------------------
-    # STRUCTURED STRENGTH WORKOUT
+    # STRENGTH WORKOUTS
     # ---------------------------------
 
     elif preferences["category"] == "Strength":
@@ -422,11 +605,10 @@ if preferences is not None:
         workout = st.session_state.workout
 
         if workout is None or workout.empty:
-            st.warning(
-                "No feasible workout could be assembled."
-            )
+            st.warning("No feasible workout found.")
 
         else:
+
             st.subheader("Your Personalized Workout")
 
             total_time = calculate_workout_time(
@@ -452,28 +634,71 @@ if preferences is not None:
                 )
 
             st.caption(
-                f"Includes an estimated "
-                f"{WARMUP_MINUTES}-minute warm-up."
+                f"Includes a {WARMUP_MINUTES}-minute "
+                "estimated warm-up."
             )
 
             if len(workout) < preferences["count"]:
                 st.info(
-                    "Fewer exercises were selected because "
-                    "of time, variety, or available options."
+                    "Fewer exercises were selected due "
+                    "to timing, variety, or availability."
                 )
 
+            # ---------------------------------
+            # SAVE WORKOUT
+            # ---------------------------------
+
             st.divider()
+            st.subheader("Save Your Workout")
+
+            if "save_message" in st.session_state:
+                st.success(
+                    st.session_state.pop("save_message")
+                )
+
+            workout_name = st.text_input(
+                "Workout name:",
+                placeholder="e.g. Chest and Triceps Day",
+                key="workout_name",
+            )
+
+            
+            if st.button(
+                "Save Workout",
+                type="primary",
+            ):
+
+                if not workout_name.strip():
+                    st.warning(
+                        "Please enter a workout name."
+                    )
+
+                else:
+                    saved_id = save_workout(
+                        workout_name,
+                        preferences,
+                        workout,
+                    )
+
+                    # Store confirmation so it survives the rerun.
+                    st.session_state["save_message"] = (
+                        f"Workout saved successfully! ID: {saved_id}"
+                    )
+
+                    # Refresh the app so the sidebar updates.
+                    st.rerun()
+
 
             # ---------------------------------
-            # EQUIPMENT FOR SUBSTITUTIONS
+            # EXERCISE SUBSTITUTIONS
             # ---------------------------------
 
+            st.divider()
             st.subheader("Exercise Substitutions")
 
             st.write(
-                "Changed gyms or lost access to equipment? "
-                "Update your available equipment below, "
-                "then choose replacement exercises."
+                "Change your available equipment to "
+                "find alternatives for exercises."
             )
 
             replacement_equipment = st.multiselect(
@@ -495,19 +720,17 @@ if preferences is not None:
             if incompatible_ids:
                 st.warning(
                     f"{len(incompatible_ids)} exercise(s) "
-                    "in your workout require equipment "
-                    "you no longer have."
+                    "require unavailable equipment."
                 )
             else:
                 st.success(
-                    "All current exercises are compatible "
-                    "with your available equipment."
+                    "All workout exercises are compatible."
                 )
 
             st.divider()
 
             # ---------------------------------
-            # DISPLAY WORKOUT + REPLACEMENTS
+            # DISPLAY EXERCISES
             # ---------------------------------
 
             for index, (_, exercise) in enumerate(
@@ -525,15 +748,15 @@ if preferences is not None:
 
                 if exercise_id in incompatible_ids:
                     st.warning(
-                        "This exercise requires unavailable "
-                        "equipment. Choose a substitute."
+                        "This exercise requires equipment "
+                        "you no longer have."
                     )
 
                 with st.expander(
                     f"Replace {exercise['name']}"
                 ):
 
-                    other_ids = [
+                    excluded_ids = [
                         item_id
                         for item_id in workout["id"].tolist()
                         if item_id != exercise_id
@@ -544,24 +767,24 @@ if preferences is not None:
                         all_exercises=exercises,
                         available_equipment=replacement_equipment,
                         experience_level=preferences["experience"],
-                        excluded_ids=other_ids,
+                        excluded_ids=excluded_ids,
                         max_results=5,
                     )
 
                     if alternatives.empty:
                         st.info(
-                            "No compatible substitutes found. "
-                            "Try selecting more equipment."
+                            "No compatible substitutes found."
                         )
 
                     else:
+
                         alternatives_by_id = {
                             row["id"]: row
                             for _, row in alternatives.iterrows()
                         }
 
                         selected_id = st.selectbox(
-                            "Choose a replacement:",
+                            "Choose an alternative:",
                             options=list(
                                 alternatives_by_id.keys()
                             ),
@@ -603,24 +826,20 @@ if preferences is not None:
                                 preferences["duration"],
                             )
 
-                            new_row = replacement.copy()
+                            new_row = replacement.to_dict()
 
                             new_row["sets"] = (
                                 prescription["sets"]
                             )
-
                             new_row["reps"] = (
                                 prescription["reps"]
                             )
-
                             new_row["rest_seconds"] = (
                                 prescription["rest_seconds"]
                             )
-
                             new_row["prescription_type"] = (
                                 prescription["prescription_type"]
                             )
-
                             new_row["estimated_minutes"] = round(
                                 estimate_exercise_seconds(
                                     prescription
@@ -628,51 +847,48 @@ if preferences is not None:
                                 1,
                             )
 
-                            # Preserve the current workout's
-                            # retrieval scores for replacement display.
-                            matching_rank = ranked[
-                                ranked["id"] == selected_id
-                            ]
+                            # Calculate current ranking scores
+                            # for the replacement exercise.
+                            replacement_ranked = rank_exercises(
+                                all_exercises=exercises,
+                                filtered_exercises=alternatives[
+                                    alternatives["id"] == selected_id
+                                ],
+                                selected_muscles=preferences["muscles"],
+                                method=preferences["ranking"],
+                            )
 
                             for score_column in [
-                                "relevance_score",
                                 "muscle_score",
                                 "tfidf_score",
+                                "relevance_score",
                             ]:
-                                if not matching_rank.empty:
-                                    new_row[score_column] = (
-                                        matching_rank.iloc[0][
+                                new_row[score_column] = (
+                                    float(
+                                        replacement_ranked.iloc[0][
                                             score_column
                                         ]
                                     )
-                                else:
-                                    new_row[score_column] = 0.0
+                                )
 
-                            updated = workout.copy()
+                            # Rebuild the workout with the new
+                            # exercise in the same position.
+                            records = workout.to_dict("records")
+                            records[index - 1] = new_row
 
-                            for column in new_row.index:
-                                if column not in updated.columns:
-                                    updated[column] = None
-
-                            for column in updated.columns:
-                                if column in new_row.index:
-                                    updated.at[
-                                        index - 1, column
-                                    ] = new_row[column]
+                            updated = pd.DataFrame(records)
 
                             new_duration = calculate_workout_time(
                                 updated,
                                 preferences,
                             )
 
-                            if (
-                                new_duration
-                                > preferences["duration"]
-                            ):
+                            if new_duration > preferences["duration"]:
                                 st.error(
-                                    "This replacement would exceed "
-                                    "your workout time limit."
+                                    "Replacement exceeds your "
+                                    "workout time limit."
                                 )
+
                             else:
                                 st.session_state.workout = updated
                                 st.rerun()
@@ -710,17 +926,22 @@ if preferences is not None:
                 hide_index=True,
             )
 
+            st.caption(
+                "Save your modified workout again "
+                "if you want to keep the changes. "
+                "Saving creates a new workout entry."
+            )
+
     # ---------------------------------
-    # OTHER CATEGORIES
+    # OTHER EXERCISE CATEGORIES
     # ---------------------------------
 
     else:
         st.subheader("Ranked Exercise Recommendations")
 
         st.caption(
-            "Structured workout generation and "
-            "substitutions are currently available "
-            "for strength workouts."
+            "Saved structured workouts are currently "
+            "supported for Strength only."
         )
 
         for index, (_, exercise) in enumerate(
