@@ -172,3 +172,5 @@ GymGenie is a project developed for **CS 410: Text Information Systems** at the 
 The project explores how information retrieval, text similarity, relevance ranking, and recommendation techniques can be applied to personalized fitness planning.
 
 Its goal is to demonstrate how search and ranking algorithms can help users discover practical exercises that adapt to different workout environments.
+
+Exercise data by [RepDB](https://repdb.co)

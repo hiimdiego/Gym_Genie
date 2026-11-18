@@ -227,3 +227,8 @@ gymgenie.db
 gymgenie.db-journal
 gymgenie.db-wal
 gymgenie.db-shm
+
+# RepDB licensed exercise dataset
+data/free*.json
+data/exercises.csv
+data/images/
