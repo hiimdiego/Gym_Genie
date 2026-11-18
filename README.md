@@ -1,4 +1,4 @@
-# 💪 GymGenie
+# GymGenie
 
 **A personalized, equipment-aware workout recommendation system.**
 
@@ -150,7 +150,7 @@ The goal is to evaluate both recommendation relevance and the practical usefulne
 
 ## Project Status
 
-🚧 **In Development**
+ **In Development**
 
 GymGenie's initial Streamlit interface supports workout preference selection. Exercise dataset integration, recommendation algorithms, workout generation, and additional features are currently under development.
 
@@ -166,8 +166,6 @@ Potential future improvements include:
 - Additional personalization and workout tracking
 
 ## About the Project
-
-GymGenie is a project developed for **CS 410: Text Information Systems** at the University of Illinois Urbana-Champaign.
 
 The project explores how information retrieval, text similarity, relevance ranking, and recommendation techniques can be applied to personalized fitness planning.
 
