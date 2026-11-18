@@ -1,8 +1,7 @@
 
 import pandas as pd
 
-from data_loader import load_exercises
-
+from src.data_loader import load_exercises
 
 # ---------------------------------
 # EQUIPMENT NAME MAPPING
